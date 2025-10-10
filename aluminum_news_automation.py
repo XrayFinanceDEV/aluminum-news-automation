@@ -1,5 +1,3 @@
-        return stats
-    
     def run_automation(self):
         """Main automation workflow"""
         self.logger.info("Starting Metals News Automation")
@@ -81,7 +79,6 @@
         except Exception as e:
             self.logger.error(f"Automation failed: {e}")
             return False
-
 def main():
     """Main function"""
     automation = AluminumNewsAutomation()
