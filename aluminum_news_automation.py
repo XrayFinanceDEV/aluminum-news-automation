@@ -1,35 +1,29 @@
 #!/usr/bin/env python3
 """
-Aluminum News Automation
-Automatically fetch and generate RSS feed for aluminum industry news using Perplexity API
-
+Metals News Automation
+Automatically fetch and generate RSS feed for metals industry news (aluminum, steel, copper, nickel) using Perplexity API
 Modules required: requests, pandas, feedgen, python-dotenv, pytz, beautifulsoup4
 """
-
 import os
 import sys
 import json
 import logging
-import csv
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict
 import pytz
-
 # Third-party imports
 try:
     import requests
     import pandas as pd
     from feedgen.feed import FeedGenerator
     from dotenv import load_dotenv
-    from bs4 import BeautifulSoup
+    from bs4 import BeautifulSoup  # noqa: F401 (kept for potential future parsing)
 except ImportError as e:
     print(f"Missing required module: {e}")
     print("Install with: pip install requests pandas feedgen python-dotenv pytz beautifulsoup4")
     sys.exit(1)
-
 # Load environment variables
 load_dotenv()
-
 # Configuration
 API_KEY = os.getenv('PERPLEXITY_API_KEY')
 API_URL = 'https://api.perplexity.ai/chat/completions'
@@ -38,20 +32,42 @@ RSS_FILE = 'data/aluminum_news_feed.xml'
 LOG_FILE = 'data/automation.log'
 MAX_RECORDS = 500
 TIMEZONE = pytz.timezone('UTC')
-
 # Categories for classification
 NEWS_CATEGORIES = {
-    'prices': ['price', 'cost', 'trading', 'market', 'exchange', 'futures', 'commodity'],
-    'production': ['production', 'output', 'capacity', 'plant', 'smelter', 'refinery'],
-    'supply_chain': ['supply', 'demand', 'inventory', 'logistics', 'transport', 'shipping'],
-    'technology': ['technology', 'innovation', 'research', 'development', 'patent', 'sustainability'],
-    'mergers': ['merger', 'acquisition', 'partnership', 'joint venture', 'deal', 'investment'],
-    'regulation': ['regulation', 'policy', 'government', 'trade', 'tariff', 'sanction'],
+    'prices': ['price', 'cost', 'trading', 'market', 'exchange', 'futures', 'commodity', 'benchmark', 'lme'],
+    'production': ['production', 'output', 'capacity', 'plant', 'smelter', 'refinery', 'mill', 'foundry'],
+    'supply_chain': ['supply', 'demand', 'inventory', 'logistics', 'transport', 'shipping', 'port', 'warehouse'],
+    'technology': ['technology', 'innovation', 'research', 'development', 'patent', 'sustainability', 'decarbonization', 'hydrogen', 'electrification'],
+    'mergers': ['merger', 'acquisition', 'partnership', 'joint venture', 'deal', 'investment', 'funding'],
+    'regulation': ['regulation', 'policy', 'government', 'trade', 'tariff', 'sanction', 'duties', 'quota'],
     'general': []
 }
-
+# Metals and Italian companies dictionaries for tagging
+METALS = ['aluminum', 'aluminium', 'steel', 'copper', 'nickel']
+VALUE_CHAIN = {
+    'cat:prices': NEWS_CATEGORIES['prices'],
+    'cat:production': NEWS_CATEGORIES['production'],
+    'cat:supply_chain': NEWS_CATEGORIES['supply_chain'],
+    'cat:technology': NEWS_CATEGORIES['technology'],
+    'cat:mergers': NEWS_CATEGORIES['mergers'],
+    'cat:regulation': NEWS_CATEGORIES['regulation']
+}
+ITALIAN_COMPANIES = {
+    'Cogne': ['cogne', 'cogne acciai speciali'],
+    'Tenaris': ['tenaris'],
+    'Prysmian': ['prysmian'],
+    'Enel X': ['enel x', 'enelx', 'enel x way', 'enel'],
+    'Italbronze': ['italbronze', 'ital bronze'],
+    'Acciai Speciali Terni': ['acciai speciali terni', 'ast terni', 'ast', 'acciaierie terni'],
+    'Arvedi': ['arvedi'],
+    'Danieli': ['danieli'],
+    "Ilva/Acciaierie d'Italia": ["ilva", "acciaierie d'italia", 'adi'],
+    'Feralpi': ['feralpi'],
+    'KME': ['kme', 'kme italy'],
+    'Alcoa Italia': ['alcoa italia', 'alcoa italy']
+}
 class AluminumNewsAutomation:
-    """Main class for aluminum news automation"""
+    """Main class for metals news automation"""
     
     def __init__(self):
         self.setup_logging()
@@ -80,16 +96,14 @@ class AluminumNewsAutomation:
         """Fetch news from Perplexity API with time filtering"""
         self.logger.info(f"Fetching news for query: {query}")
         
-        # Calculate time window
-        now = datetime.now(TIMEZONE)
-        time_filter = now - timedelta(hours=hours_back)
-        
         messages = [
             {
                 "role": "user",
-                "content": f"Find recent aluminum industry news from the last {hours_back} hours about {query}. "
-                          f"Include title, summary, source, publication date, and URL for each article. "
-                          f"Format as JSON with fields: title, summary, source, date, url, relevance_score"
+                "content": (
+                    f"Find recent metals industry news from the last {hours_back} hours about {query}. "
+                    f"Include title, summary, source, publication date, and URL for each article. "
+                    f"Format as JSON with fields: title, summary, source, date, url, relevance_score"
+                )
             }
         ]
         
@@ -140,13 +154,38 @@ class AluminumNewsAutomation:
             return max(category_scores.keys(), key=category_scores.get)
         return 'general'
     
+    def auto_tags(self, title: str, summary: str) -> List[str]:
+        """Assign automatic tags: company, metal, value chain category"""
+        text = f"{title} {summary}".lower()
+        tags = set()
+        # Metal tags
+        for m in METALS:
+            if m in text:
+                # normalize aluminium to aluminum
+                metal_norm = 'aluminum' if m in ['aluminium', 'aluminum'] else m
+                tags.add(f"metallo:{metal_norm}")
+        # Company tags
+        for company, patterns in ITALIAN_COMPANIES.items():
+            for p in patterns:
+                if p in text:
+                    tags.add(f"azienda:{company}")
+                    break
+        # Value chain tags via keywords
+        for cat_tag, keywords in VALUE_CHAIN.items():
+            if any(k in text for k in keywords):
+                tags.add(cat_tag)
+        return sorted(tags)
+    
     def load_existing_data(self) -> pd.DataFrame:
         """Load existing CSV database or create new one"""
-        columns = ['id', 'title', 'summary', 'source', 'date', 'url', 'category', 'relevance_score', 'created_at']
+        columns = ['id', 'title', 'summary', 'source', 'date', 'url', 'category', 'relevance_score', 'created_at', 'tags']
         
         if os.path.exists(CSV_FILE):
             try:
                 df = pd.read_csv(CSV_FILE)
+                # Backward compatibility: ensure tags column exists
+                if 'tags' not in df.columns:
+                    df['tags'] = ''
                 self.logger.info(f"Loaded {len(df)} existing records")
                 return df
             except Exception as e:
@@ -172,6 +211,9 @@ class AluminumNewsAutomation:
                 article.get('title', ''), 
                 article.get('summary', '')
             )
+            # Compute tags
+            tags_list = self.auto_tags(article.get('title', ''), article.get('summary', ''))
+            tags_str = ';'.join(tags_list)
             
             new_row = {
                 'id': article_id,
@@ -182,7 +224,8 @@ class AluminumNewsAutomation:
                 'url': article.get('url', ''),
                 'category': category,
                 'relevance_score': article.get('relevance_score', 50),
-                'created_at': datetime.now(TIMEZONE).isoformat()
+                'created_at': datetime.now(TIMEZONE).isoformat(),
+                'tags': tags_str,
             }
             new_rows.append(new_row)
         
@@ -209,12 +252,12 @@ class AluminumNewsAutomation:
         
         # Create feed generator
         fg = FeedGenerator()
-        fg.title('Aluminum Industry News')
+        fg.title('Metals Industry News')
         fg.link(href='https://github.com/XrayFinanceDEV/aluminum-news-automation')
-        fg.description('Automated news feed for aluminum industry updates')
+        fg.description('Automated news feed for metals industry updates (Al, Fe, Cu, Ni)')
         fg.language('en')
         fg.lastBuildDate(datetime.now(TIMEZONE))
-        fg.generator('Aluminum News Automation')
+        fg.generator('Metals News Automation')
         
         # Add items (limit to most recent 50 for RSS performance)
         recent_articles = df.head(50)
@@ -223,9 +266,14 @@ class AluminumNewsAutomation:
             fe = fg.add_entry()
             fe.id(str(row['id']))
             fe.title(row['title'])
-            fe.description(row['summary'])
+            # Include tags in description footer
+            description = row['summary'] if pd.notna(row['summary']) else ''
+            if 'tags' in row and pd.notna(row['tags']) and str(row['tags']).strip():
+                description += f"\n\nTags: {row['tags']}"
+            fe.description(description)
             fe.link(href=row['url'] if pd.notna(row['url']) else '')
-            fe.author({'name': row['source']})
+            if pd.notna(row['source']) and str(row['source']).strip():
+                fe.author({'name': row['source']})
             
             # Handle date conversion
             try:
@@ -269,7 +317,7 @@ class AluminumNewsAutomation:
     
     def run_automation(self):
         """Main automation workflow"""
-        self.logger.info("Starting Aluminum News Automation")
+        self.logger.info("Starting Metals News Automation")
         
         if not API_KEY:
             self.logger.error("PERPLEXITY_API_KEY not found in environment")
@@ -281,11 +329,33 @@ class AluminumNewsAutomation:
             
             # Define search queries for different aspects
             queries = [
+                # Aluminum
                 "aluminum prices and market trends",
                 "aluminum production and capacity",
-                "aluminum supply chain and logistics",
-                "aluminum technology and sustainability",
-                "aluminum industry mergers and acquisitions"
+                "aluminum technology innovation sustainability",
+                # Steel
+                "steel prices and market trends",
+                "steel production and capacity",
+                "steel technology innovation sustainability",
+                # Copper
+                "copper prices and market trends",
+                "copper production and capacity",
+                "copper technology innovation sustainability",
+                # Nickel
+                "nickel prices and market trends",
+                "nickel production and capacity",
+                "nickel technology innovation sustainability",
+                # Italian companies in metals sector
+                "Cogne Acciai Speciali news aluminum steel italy",
+                "Tenaris news steel italy",
+                "Prysmian news copper cables italy",
+                "Enel X news energy storage metals italy",
+                "Italbronze news bronze copper italy",
+                "Acciai Speciali Terni news steel italy",
+                "Arvedi news steel italy",
+                "Danieli news steel plants italy",
+                "Ilva Acciaierie d'Italia news steel italy",
+                "KME Italy news copper italy"
             ]
             
             all_new_articles = []
@@ -320,13 +390,4 @@ def main():
     """Main function"""
     automation = AluminumNewsAutomation()
     success = automation.run_automation()
-    
-    if success:
-        print("✅ Automation completed successfully")
-        sys.exit(0)
-    else:
-        print("❌ Automation failed")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+   
